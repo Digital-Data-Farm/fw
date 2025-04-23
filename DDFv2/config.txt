@@ -1,9 +1,10 @@
-TEST
-1
-5
-30
-5
-bam.clarochile.cl
-clarochile
-clarochile
-eyJhbGciOiJIUzI1NiJ9.eyJlaWQiOiI4NCIsInJvbGUiOiJjbGllbnQiLCJzdWIiOiJBbGVVU00ifQ.rxWjbaw_JHWQg-K0xTUW0ETno9tUo_BuyaIxtIT-MrA
+TEST                 ; plot_name
+1                    ; dl_name
+5                    ; sensor_read_frec_sec
+30                   ; send_data_frec_sec
+5                    ; send_data_window_sec
+bam.clarochile.cl    ; apn
+clarochile           ; apn_user
+clarochile           ; apn_pass
+eyJhbGciOiJIUzI1NiJ9.eyJlaWQiOiI4NCIsInJvbGUiOiJjbGllbnQiLCJzdWIiOiJBbGVVU00ifQ.rxWjbaw_JHWQg-K0xTUW0ETno9tUo_BuyaIxtIT-MrA ; bearer_token
+

@@ -1,4 +1,5 @@
-/* Integrated Farm Monitor Sketch — API INTA Compatible
+/*
+ * Integrated Farm Monitor Sketch — API INTA Compatible
  * - 4G + SDI-12 + RS485 + I2C (except MCP & INA)
  * - Contadores con MCP23017
  * - GPS externo
@@ -18,6 +19,8 @@
 #include <Adafruit_INA219.h>
 #include <time.h>
 #include <map>
+#include <Update.h>
+
 #define MODEM_BAUDRATE             115200
 #define MODEM_DTR_PIN              25
 #define MODEM_TX_PIN               26
@@ -55,6 +58,10 @@ TinyGPSPlus      gps;
 String network_apn, apn_user, apn_pass, bearer_token;
 const char* URL_SAVE  = "https://api.digitaldatafarm.com/api/v4/logger/save_sonda_info";
 const char* URL_EVENT = "https://api.digitaldatafarm.com/api/v4/logger/event";
+const char* version_url = "https://raw.githubusercontent.com/Digital-Data-Farm/fw/main/DDFv2/build/ddf/version.txt";
+const char* firmware_url = "https://raw.githubusercontent.com/Digital-Data-Farm/fw/main/DDFv2/build/ddf/DDFv2.ino.bin";
+
+const String version_actual = "1.0.0";  // Versión actual del firmware
 
 struct DeviceConfig {
   String plot_name;
@@ -65,8 +72,7 @@ struct DeviceConfig {
   int send_data_window_sec;
 };
 
-
-DeviceConfig config = {"TEST","1","0.2",5,30,5};
+DeviceConfig config = {"TEST", "1", "0.2", 5, 30, 5};
 
 const char* CONFIG_FILE  = "/config.txt";
 const char* PENDING_FILE = "/pending.txt";
@@ -80,7 +86,6 @@ unsigned long lastSendTime = 0;
 double gpsLat = NAN, gpsLng = NAN;
 char   gpsDateTime[32] = "";
 std::map<String, JsonArray> sdi12Results;
-
 
 void setup() {
   Serial.begin(115200);
@@ -96,6 +101,7 @@ void setup() {
   digitalWrite(SDI12_POWER_PIN, LOW);
   readConfig();
   initModem();
+  verificarActualizacion();  // Verificar OTA en el inicio
 }
 
 void loop() {
@@ -120,10 +126,97 @@ void loop() {
     String resp = sendWithGSM(payload, URL_SAVE);
     if (resp.length()) handleResponse(resp);
     else bufferPending(payload);
+    verificarActualizacion();  // Verificar OTA en cada envío de datos
   }
 }
 
+// Función para verificar actualizaciones de firmware
+void verificarActualizacion() {
+  Serial.println("Revisando nueva versión...");
+  modem.https_begin();
+  modem.sendAT("AT+CSSLCFG=\"ignorecertCN\",0,1"); modem.waitResponse();
+  if (!modem.https_set_url(version_url)) {
+    Serial.println("Error al configurar URL para versión.");
+    return;
+  }
+  int httpCode = modem.https_get();
+  if (httpCode == 200) {
+    String nueva_version = modem.https_body();
+    nueva_version.trim();
+    Serial.println("Versión en servidor: " + nueva_version);
+    if (nueva_version != version_actual) {
+      Serial.println("Nueva versión disponible. Iniciando actualización...");
+      actualizarFirmware();
+    } else {
+      Serial.println("Ya tienes la última versión.");
+    }
+  } else {
+    Serial.println("Error al obtener la versión: " + String(httpCode));
+  }
+  modem.https_end();
+}
 
+// Función para actualizar el firmware
+void actualizarFirmware() {
+  modem.https_begin();
+  modem.sendAT("AT+CSSLCFG=\"ignorecertCN\",0,1"); 
+  modem.waitResponse();
+
+  if (!modem.https_set_url(firmware_url)) {
+    Serial.println("Error al configurar URL para firmware.");
+    modem.https_end();
+    return;
+  }
+
+  int httpCode = modem.https_get();  // Perform HTTPS GET request
+  Serial.println("HTTP Response Code: " + String(httpCode));
+
+  if (httpCode == 200) {  // HTTP 200 OK
+    String responseBody = modem.https_body();  // Get the entire response body
+    int len = responseBody.length();
+    if (len <= 0) {
+      Serial.println("Error: Tamaño de firmware inválido.");
+      modem.https_end();
+      return;
+    }
+
+    bool canBegin = Update.begin(len); // Initialize firmware update
+    if (!canBegin) {
+      Serial.println("No se puede iniciar la actualización. Memoria insuficiente.");
+      modem.https_end();
+      return;
+    }
+
+    Serial.println("Comenzando actualización...");
+
+    uint8_t* data = (uint8_t*)responseBody.c_str();  // Remove "const" from the pointer
+    size_t written = Update.write(data, len);  // Write the entire response body to the firmware update
+
+    if (written == len) {
+      Serial.println("Actualización escrita correctamente.");
+    } else {
+      Serial.println("Error al escribir el firmware.");
+      Update.end();  // Abort update
+      modem.https_end();
+      return;
+    }
+
+    if (Update.end()) {
+      if (Update.isFinished()) {
+        Serial.println("Actualización exitosa. Reiniciando...");
+        ESP.restart();
+      } else {
+        Serial.println("Actualización incompleta.");
+      }
+    } else {
+      Serial.println("Error finalizando la actualización: " + String(Update.getError()));
+    }
+  } else {
+    Serial.println("No se pudo descargar el firmware: " + String(httpCode));
+  }
+
+  modem.https_end();  // Close HTTPS connection
+}
 
 void readSensors() {
   sdi12Results.clear();
@@ -134,25 +227,41 @@ void readSensors() {
     for (int i = 0; i <= 61; i++) {
       char addr = (i < 10 ? '0' + i : (i < 36 ? 'A' + i - 10 : 'a' + i - 36));
       bus->clearBuffer();
-      String cmd = String(addr) + "!";
-      bus->sendCommand(cmd); delay(100);
-      if (bus->available()) {
-        bus->clearBuffer();
-        String measureCmd = String(addr) + "C!";
-        bus->sendCommand(measureCmd);
-        delay(2000);
-        String sondaID = "SENTEK__DD_" + String(addr) + String((int)millis() % 100000); // fake ID
-        JsonArray temp = sdi12Results[sondaID].createNestedArray();
-        JsonArray hum  = sdi12Results[sondaID].createNestedArray();
-        JsonArray sal  = sdi12Results[sondaID].createNestedArray();
+      bus->sendCommand(String(addr) + "I!");  // Envía comando de identificación
+      delay(300);
+      String ident = "";
+      while (bus->available()) {
+        ident += (char)bus->read();
+      }
+
+      if (ident.length() > 0) {
+        String vendor = ident.substring(0, 8);  vendor.trim();
+        String model  = ident.substring(8, 16); model.trim();
+        String ver    = ident.substring(16, 18);ver.trim();
+        String id     = ident.substring(18);    id.trim();
+
+        String key = vendor + "__" + model + ver + id;
+        key.replace(" ", "_");
+
+        // Iniciar medición
+        bus->sendCommand(String(addr) + "C!");
+        delay(2000); // tiempo típico de conversión
+        JsonArray temp = sdi12Results[key].createNestedArray();
+        JsonArray hum  = sdi12Results[key].createNestedArray();
+        JsonArray sal  = sdi12Results[key].createNestedArray();
+
         for (int d = 0; d < 3; d++) {
-          String cmdD = String(addr) + "D" + String(d) + "!";
-          bus->sendCommand(cmdD); delay(300);
+          bus->sendCommand(String(addr) + "D" + String(d) + "!");
+          delay(300);
+          int count = 0;
           while (bus->available()) {
             float val = bus->parseFloat(SKIP_NONE);
-            if (!temp.size()) temp.add(val);
-            else if (!hum.size()) hum.add(val);
-            else sal.add(val);
+            if (!isnan(val)) {
+              if (count < 6) temp.add(val);
+              else if (count < 12) hum.add(val);
+              else sal.add(val);
+              count++;
+            }
           }
         }
       }
@@ -160,6 +269,7 @@ void readSensors() {
   }
   digitalWrite(SDI12_POWER_PIN, LOW);
 }
+
 void saveConfigToSD() {
   File f = SD.open(CONFIG_FILE, FILE_WRITE);
   if (!f) {
@@ -310,7 +420,7 @@ else if (n == "bearer_token") bearer_token = v;
   }
 
   if (ok) {
-    saveConfigToSD(); // 🟢 Guardar si se actualizaron valores válidos
+    saveConfigToSD(); //  Guardar si se actualizaron valores válidos
   }
 
   JsonObject r = events.createNestedObject(pkg).createNestedObject(String(id));
